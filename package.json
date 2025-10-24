@@ -9,7 +9,8 @@
     "web": "expo start --web",
     "test": "jest",
     "lint": "eslint . --ext .ts,.tsx",
-    "format": "prettier --write \"**/*.{ts,tsx,json,md}\""
+    "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
+    "vercel-build": "expo export -p web"
   },
   "dependencies": {
     "@expo/metro-runtime": "~3.2.3",
