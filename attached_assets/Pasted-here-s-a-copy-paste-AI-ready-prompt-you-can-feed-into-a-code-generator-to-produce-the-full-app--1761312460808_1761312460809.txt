@@ -1,0 +1,304 @@
+here’s a copy-paste, **AI-ready prompt** you can feed into a code generator to produce the full app with a polished UI. it’s explicit about architecture, UX, files, and acceptance criteria so you get “app-ready” code in one go.
+
+---
+
+### 🔧 PROMPT TO GENERATE THE APP
+
+You are a senior React Native + TypeScript engineer and product designer.
+Generate a complete **Expo** project that implements the following **mobile app** exactly, with a clean, modern, accessible UI and the file structure provided. Output the full code for **every file** you create.
+
+---
+
+## 1) Project goals
+
+Build a student-focused mobile app that:
+
+1. Imports **MT103** or **NACHA** legacy payment text,
+2. Shows a side-by-side **Mapping Preview** (Legacy → ISO 20022),
+3. Converts to **ISO 20022** XML (**pacs.008.001.08** for MT103, **pain.001.001.09** for NACHA),
+4. **Validates** XML against XSD (use built-in validator; include fallback soft-validation if XSD libs are limited),
+5. Displays **Risks & Assumptions** detected from the data,
+6. Exports the XML and a JSON **Mapping Report**,
+7. Has a great frontend with delightful micro-interactions.
+
+---
+
+## 2) Tech stack & quality bar
+
+* **Expo (SDK ≥ 51)**, **TypeScript**
+* **React Navigation** (stack), **React Query** (server-ish state), **Zustand** (UI state)
+* **xmlbuilder2** for XML creation
+* **libxmljs2** for XSD validation; if unavailable on device, expose a fallback JS validator that checks required nodes & types (flag clearly in UI)
+* **fast-xml-parser** for quick sanity checks (optional)
+* **Jest** + **@testing-library/react-native** for tests
+* **ESLint** + **Prettier**
+* **Theming/UI**: create a small design system (colors, spacing, typography), dark mode support, haptics, subtle animations (Reanimated or Moti)
+
+---
+
+## 3) Required project structure
+
+Create exactly this layout (add any extra root files needed like `App.tsx`, `package.json`, config):
+
+```
+mdcb-transform-app/
+├─ app/                   # RN screens
+│  ├─ Home.tsx
+│  ├─ Import.tsx
+│  ├─ MappingPreview.tsx
+│  ├─ ConvertValidate.tsx
+│  ├─ Risks.tsx
+│  └─ History.tsx
+├─ core/
+│  ├─ parse-mt103.ts      # tag parser → MT103 model
+│  ├─ parse-nacha.ts      # fixed-width parser → NachaEntry
+│  ├─ build-pacs008.ts    # model → XML (xmlbuilder2)
+│  ├─ build-pain001.ts
+│  ├─ xsd/                # pacs.008 & pain.001 XSDs
+│  └─ validate-xml.ts     # uses libxmljs2 or fallback soft checks
+├─ assets/samples/        # sample MT103/NACHA text
+├─ tests/                 # jest unit tests (parser, amounts, dates)
+└─ README.md              # how to run + demo steps
+```
+
+Also include:
+
+* `App.tsx` (navigation + theme providers)
+* `src/components/` (shared UI: Button, Card, ListItem, EmptyState, Tag/Chip, Timeline, CodeBlock)
+* `src/theme/` (design tokens + dark/light theme switch)
+* `src/utils/` (date, currency, file I/O, toasts, haptics)
+
+---
+
+## 4) Domain models & contracts
+
+Create these TypeScript types and use them throughout:
+
+```ts
+// Legacy → parsed domain
+export type MT103 = {
+  trnRef: string;                  // :20:
+  valueDate: string;               // :32A: YYMMDD
+  currency: string;                // :32A:
+  amount: string;                  // :32A:
+  debtor: { name: string; addressLines: string[]; account?: string };   // :50K:
+  creditor: { name: string; addressLines: string[]; account?: string }; // :59:
+  remittance?: string;             // :70:
+  charges?: 'SHA'|'BEN'|'OUR';     // :71A:
+};
+
+export type NachaEntry = {
+  fileHeader: Record<string, string>;
+  batchHeader: Record<string, string>;
+  entries: Array<{ name: string; routing: string; account: string; amountCents: number; memo?: string }>;
+  controls: Record<string, string>;
+};
+
+export type MappingRow = { source: string; value: string; targetXPath: string; note?: string };
+export type MappingReport = { messageId: string; rows: MappingRow[]; assumptions: string[]; risks: string[] };
+
+export type XmlValidationResult = { valid: true } | { valid: false; errors: string[] };
+```
+
+---
+
+## 5) Parsing rules
+
+### `core/parse-mt103.ts`
+
+* Robust line parser for SWIFT MT103 tags:
+
+  * `:20:` → trnRef
+  * `:32A:` (format `YYMMDDCCYAmount`) → valueDate, currency, amount (handle comma or dot)
+  * `:50K:` → debtor (split into name + address lines)
+  * `:59:`  → creditor (name + account if present)
+  * `:70:`  → remittance (free text)
+  * `:71A:` → charges
+* Handle line wraps; ignore unknown tags but store in `extras`.
+
+### `core/parse-nacha.ts`
+
+* Fixed-width parser:
+
+  * `101` File Header, `5xx` Batch Header
+  * `622` Entry Detail (routing, account, amount in cents, name, memo)
+  * `822` Batch Control, `9xx` File Control
+* Multiple `622` rows map to multiple credit transfers in one payment info block.
+
+Include helpful error messages (line/column context).
+
+---
+
+## 6) Mapping & build rules
+
+### MT103 → pacs.008.001.08 (`core/build-pacs008.ts`)
+
+* Map:
+
+  * `:20:` → `GrpHdr/MsgId` and `CdtTrfTxInf/PmtId/EndToEndId` (or generated UUID if missing)
+  * `:32A:` → `IntrBkSttlmDt`, `IntrBkSttlmAmt @Ccy`, amount
+  * `:50K:` → `Dbtr` (+ `DbtrAcct/Id/Othr/Id` if account parsed)
+  * `:59:`  → `Cdtr` (+ `CdtrAcct/...`)
+  * `:70:`  → `RmtInf/Ustrd`
+  * `:71A:` → `ChrgBr` (map OUR→DEBT if schema requires)
+* Generate `GrpHdr` boilerplate: `CreDtTm`, `NbOfTxs`, `SttlmInf` minimal.
+* Return the built XML string and a `MappingReport`.
+
+### NACHA → pain.001.001.09 (`core/build-pain001.ts`)
+
+* Debtor = company in Batch Header
+* For each `622` entry produce `CdtTrfTxInf` with creditor name/account/routing
+* Amount = cents → `InstdAmt` decimal with `@Ccy='USD'`
+* Normalize dates `YYMMDD → YYYY-MM-DD`
+* Populate control sums.
+
+---
+
+## 7) Validation (`core/validate-xml.ts`)
+
+* Primary: use `libxmljs2` to validate against local XSDs in `core/xsd/`.
+* Fallback: soft validator that checks presence of required nodes, attribute types, and basic constraints; returns structured errors.
+* Expose `validatePacs008(xml: string)` and `validatePain001(xml: string)`.
+
+**Include XSD files**:
+
+* Put **pacs.008** and **pain.001** XSDs (either full official schemas or a **minimal subset XSD** that covers the nodes we generate) into `core/xsd/`. Document how to replace with official ones.
+
+---
+
+## 8) Screens (UX & visuals)
+
+Create polished, responsive screens with delightful micro-interactions, dark mode, and haptics:
+
+### `Home.tsx`
+
+* Header: “MDCB Transform”
+* Actions: **Import MT103**, **Import NACHA**, **Samples**, **History**
+* Cards: “What this app does,” “How it works” (3 steps), “Grading-friendly features”
+* Nice empty states and shortcuts
+
+### `Import.tsx`
+
+* Tabs: MT103 | NACHA
+* Input area: paste text or pick file
+* Auto-detect format + inline linting (chips show detected fields)
+* CTA: **Continue** → to Mapping Preview
+* Subtle progress indicator, toasts for success/error
+
+### `MappingPreview.tsx`
+
+* Two-column diff table (left: Legacy Field; right: ISO XPath)
+* Search/filter, sticky headers
+* Chips for assumptions (editable toggles), copy-to-clipboard for XPath
+* “View JSON Mapping Report”
+* CTA: **Convert & Validate**
+
+### `ConvertValidate.tsx`
+
+* Show generated XML in a **CodeBlock** (collapsible)
+* **Validation result** card:
+
+  * ✅ Valid (with timing) or ❌ Errors (list with tap-to-scroll to element)
+* Buttons: **Export XML**, **Export Mapping Report (JSON)**
+* Timeline of conversion steps (Parsed → Built → Validated)
+
+### `Risks.tsx`
+
+* Detected risk chips with severity (Info/Warning/Critical)
+* For each risk: title, why it matters, mitigation (plain English)
+* Toggle to include risk notes in exported JSON mapping report
+
+### `History.tsx`
+
+* List previous runs with date/time, type, status (Valid/Errors)
+* Tap to reopen and re-export
+
+**Design system**
+
+* Create `src/theme/tokens.ts` with brand colors (primary, secondary, surface, success, warning, danger), spacing scale, radii, shadows, typography
+* Components: `Button`, `Card`, `Chip`, `Timeline`, `ListItem`, `EmptyState`, `CodeBlock` (monospace, copy button), `Toast`
+* Animations: use Moti or Reanimated for button press, chip toggles, and timeline entrance
+* Accessibility: sufficient contrast, large hit areas, VoiceOver labels, dynamic type friendly
+
+---
+
+## 9) Sample data (`assets/samples/`)
+
+Create two realistic files:
+
+`mt103-sample.txt`
+
+```
+:20:TRNREF123456
+:32A:250930USD1234,56
+:50K:/123456789
+JOHN DOE
+123 CAMPUS RD
+CITY ST
+:59:/987654321
+JANE STUDENT
+45 DORM WAY
+CITY ST
+:70:Utilities share for Sep
+:71A:SHA
+```
+
+`nacha-sample.txt`
+
+```
+101 123456789 9876543212509300000000A094101MDCB BANK           STUDENT FILE
+5225STUDENT CLUB       123456789PPDREIMBURSE       250930   1123456780000001
+6229876543211234567890        0000012345JANE STUDENT       RENT SHARE     0
+82200000010000012345                                        123456780000001
+9000001000001000000010000012345
+```
+
+---
+
+## 10) Tests (`tests/`)
+
+Write Jest tests:
+
+* `parse-mt103.spec.ts`: parses dates/currency/amount, multi-line addresses, charges
+* `parse-nacha.spec.ts`: parses multiple 622 entries, amounts in cents
+* `build-pacs008.spec.ts`: builds XML with correct XPaths & values
+* `validate-xml.spec.ts`: valid XML returns `valid:true`, broken field triggers error
+* Pure utility tests for date normalization & currency formatting
+
+---
+
+## 11) README.md
+
+Include:
+
+* Quick start (Expo, `npm i`, `npx expo start`)
+* What the app does
+* Sample walkthrough (import → preview → convert → validate → export)
+* How to replace XSDs with official ones
+* Known limitations & roadmap
+
+---
+
+## 12) Acceptance criteria
+
+* App compiles and runs in Expo Go (iOS/Android)
+* Import of provided sample files succeeds
+* Mapping Preview shows at least **10** mapping rows for MT103 and full entry mapping for NACHA
+* Convert produces syntactically correct XML; validation returns ✅ with bundled XSDs (or soft validation with clear notice)
+* Risks screen shows at least 5 distinct checks (e.g., missing address line, unknown currency, amount ≤ 0, unstructured remittance, first-time payee)
+* Export functions create shareable XML and JSON mapping report
+* UI meets accessibility basics and supports dark mode
+* All tests pass (`npm test`) with >80% coverage in `core/`
+
+---
+
+## 13) Nice-to-have polish (implement if small)
+
+* History persists to async storage
+* Haptic feedback on primary CTAs
+* Copy buttons for XML and mapping rows
+* Lottie success checkmark on validation pass
+
+---
+
+**Generate the full project with all files populated and runnable. Do not omit any code.**
